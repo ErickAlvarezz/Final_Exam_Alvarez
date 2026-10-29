@@ -1,0 +1,144 @@
+---
+- name: Final
+  hosts: all
+  become: true
+  vars_files:
+    - config.yml
+
+  tasks:
+    - name: Install Docker, curl and pip (Debian family)
+      ansible.builtin.apt:
+        name:
+          - docker.io
+          - curl
+          - python3-pip
+        state: present
+        update_cache: true
+      when: ansible_os_family == "Debian"
+
+    - name: Add Docker CE repo (RedHat family)
+      ansible.builtin.get_url:
+        url: https://download.docker.com/linux/centos/docker-ce.repo
+        dest: /etc/yum.repos.d/docker-ce.repo
+        mode: "0644"
+      when: ansible_os_family == "RedHat"
+
+    - name: Install Docker, curl and pip (RedHat family)
+      ansible.builtin.package:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - curl
+          - python3-pip
+        state: present
+      when: ansible_os_family == "RedHat"
+
+    - name: Start and enable Docker
+      ansible.builtin.service:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Remove distro Docker SDK (Debian)
+      ansible.builtin.apt:
+        name: python3-docker
+        state: absent
+        autoremove: false
+      when: ansible_os_family == "Debian"
+
+    - name: Remove distro Docker SDK (RedHat)
+      ansible.builtin.package:
+        name: python3-docker
+        state: absent
+      when: ansible_os_family == "RedHat"
+
+    - name: Install Docker SDK for Python (modern Python 3.8+)
+      ansible.builtin.pip:
+        name:
+          - docker>=7.1.0
+          - requests>=2.32.3
+        executable: pip3
+        extra_args: >-
+          --ignore-installed
+          {{ '--break-system-packages'
+             if (ansible_distribution == 'Debian' and ansible_distribution_major_version | int >= 12)
+             or (ansible_distribution == 'Ubuntu' and ansible_distribution_major_version | int >= 23)
+             else '' }}
+        state: present
+      when: ansible_python.version.minor | int >= 8
+
+    - name: Install Docker SDK for Python (legacy Python 3.6/3.7)
+      ansible.builtin.pip:
+        name:
+          - docker==5.0.3
+          - requests==2.27.1
+          - urllib3<2
+        executable: pip3
+        extra_args: "--ignore-installed"
+        state: present
+      when: ansible_python.version.minor | int < 8
+
+    - name: Install Nginx (Debian)
+      ansible.builtin.apt:
+        name: nginx
+        state: present
+        update_cache: true
+      when: ansible_os_family == "Debian"
+
+    - name: Install EPEL repository (RedHat)
+      ansible.builtin.dnf:
+        name: epel-release
+        state: present
+      when: ansible_os_family == "RedHat"
+
+    - name: Install Nginx (RedHat)
+      ansible.builtin.dnf:
+        name: nginx
+        state: present
+      when: ansible_os_family == "RedHat"
+
+    - name: Stop and disable host Nginx
+      ansible.builtin.service:
+        name: nginx
+        state: stopped
+        enabled: false
+
+    - name: Deploy custom index page
+      ansible.builtin.copy:
+        dest: /opt/index.html
+        content: "<h1>Nginx on {{ ansible_hostname }} ({{ ansible_distribution }}) - Managed by {{ motd_user }}</h1>\n"
+        mode: "0644"
+
+    - name: Run Nginx container
+      community.docker.docker_container:
+        name: "{{ nginx_container }}"
+        image: "{{ nginx_image }}"
+        state: started
+        restart_policy: always
+        recreate: true
+        published_ports:
+          - "{{ nginx_port }}:80"
+        volumes:
+          - /opt/index.html:/usr/share/nginx/html/index.html:ro
+
+    - name: Run Node Exporter container
+      community.docker.docker_container:
+        name: "{{ monitor_container }}"
+        image: "{{ monitor_image }}"
+        state: started
+        restart_policy: always
+        recreate: true
+        network_mode: host
+        pid_mode: host
+        volumes:
+          - /:/host:ro,rslave
+        command:
+          - "--path.rootfs=/host"
+          - "--web.listen-address=:{{ monitor_port }}"
+
+    - name: Set MOTD
+      ansible.builtin.copy:
+        dest: /etc/motd
+        content: "Ansible Managed by {{ motd_user }}\n"
+        mode: "0644"
